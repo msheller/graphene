@@ -115,45 +115,6 @@ static void __store_info (siginfo_t * info, struct shim_signal * signal)
         memcpy(&signal->info, info, sizeof(siginfo_t));
 }
 
-void __store_context (shim_tcb_t * tcb, PAL_CONTEXT * pal_context,
-                      struct shim_signal * signal)
-{
-    ucontext_t * context = &signal->context;
-
-    if (tcb && tcb->context.regs && tcb->context.regs->orig_rax) {
-        struct shim_context * ct = &tcb->context;
-
-        if (ct->regs) {
-            struct shim_regs * regs = ct->regs;
-            context->uc_mcontext.gregs[REG_RIP] = regs->rip;
-            context->uc_mcontext.gregs[REG_EFL] = regs->rflags;
-            context->uc_mcontext.gregs[REG_R15] = regs->r15;
-            context->uc_mcontext.gregs[REG_R14] = regs->r14;
-            context->uc_mcontext.gregs[REG_R13] = regs->r13;
-            context->uc_mcontext.gregs[REG_R12] = regs->r12;
-            context->uc_mcontext.gregs[REG_R11] = regs->r11;
-            context->uc_mcontext.gregs[REG_R10] = regs->r10;
-            context->uc_mcontext.gregs[REG_R9]  = regs->r9;
-            context->uc_mcontext.gregs[REG_R8]  = regs->r8;
-            context->uc_mcontext.gregs[REG_RCX] = regs->rcx;
-            context->uc_mcontext.gregs[REG_RDX] = regs->rdx;
-            context->uc_mcontext.gregs[REG_RSI] = regs->rsi;
-            context->uc_mcontext.gregs[REG_RDI] = regs->rdi;
-            context->uc_mcontext.gregs[REG_RBX] = regs->rbx;
-            context->uc_mcontext.gregs[REG_RBP] = regs->rbp;
-            context->uc_mcontext.gregs[REG_RSP] = regs->rsp;
-        }
-
-        signal->context_stored = true;
-        return;
-    }
-
-    if (pal_context) {
-        memcpy(context->uc_mcontext.gregs, pal_context, sizeof(PAL_CONTEXT));
-        signal->context_stored = true;
-    }
-}
-
 #ifdef __x86_64__
 #define IP rip
 #else
@@ -196,8 +157,6 @@ void deliver_signal (siginfo_t * info, PAL_CONTEXT * context)
     /* save in signal */
     memset(signal, 0, sizeof(struct shim_signal));
     __store_info(info, signal);
-    __store_context(tcb, context, signal);
-    signal->pal_context = context;
 
     if (preempt > 1 || context == NULL ||
         context_is_internal(context) || DkInPal(context) ||
@@ -834,8 +793,8 @@ static void __setup_sig_frame(
     context->rax = 0;
     context->fpregs = NULL;
 
-    debug("deliver signal handler to user stack %p (%d, %p, %p) sigframe: %p uc: %p fpstate %p\n",
-          handler, sig, &signal->info, &signal->context,
+    debug("deliver signal handler to user stack %p (%d, %p) sigframe: %p uc: %p fpstate %p\n",
+          handler, sig, &signal->info,
           user_sigframe, &user_sigframe->uc,
           user_sigframe->uc.uc_mcontext.fpregs);
 }
@@ -864,8 +823,7 @@ __handle_one_signal(shim_tcb_t* tcb, int sig, struct shim_signal* signal, PAL_CO
          * delivery is done by deliver_signal_on_sysret()
          */
         debug("appending signal for trigger syscall return  "
-              "%p (%d, %p, %p)\n", handler, sig, &signal->info,
-              &signal->context);
+              "%p (%d, %p)\n", handler, sig, &signal->info);
         struct shim_signal** signal_log = allocate_signal_log(thread, sig);
         if (signal_log) {
             *signal_log = signal;
@@ -878,11 +836,6 @@ __handle_one_signal(shim_tcb_t* tcb, int sig, struct shim_signal* signal, PAL_CO
         return;
 
     debug("%s handled\n", signal_name(sig));
-
-    // If the context is never stored in the signal, it means the signal is handled during
-    // system calls, and before the thread is resumed.
-    if (!signal->context_stored)
-        __store_context(tcb, NULL, signal);
 
     /*
      * host signal arrived while application is running.
@@ -927,9 +880,6 @@ static void __handle_signal(shim_tcb_t * tcb, int sig, PAL_CONTEXT* context) {
 
         if (!signal)
             break;
-
-        if (!signal->context_stored)
-            __store_context(tcb, NULL, signal);
 
         __handle_one_signal(tcb, sig, signal, context);
         free(signal);
@@ -1222,7 +1172,6 @@ void append_signal(struct shim_thread* thread, int sig, siginfo_t* info, bool ne
     /* save in signal */
     if (info) {
         __store_info(info, signal);
-        signal->context_stored = false;
     } else {
         memset(signal, 0, sizeof(struct shim_signal));
     }
